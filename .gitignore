@@ -1,0 +1,33 @@
+# ---- 本地数据(不入库) ----
+mp3/
+transcripts/
+notes/
+graphs/
+knowledge/
+
+# ---- 配置(含 API key, 绝不可提交)----
+# 注意: ~/.class-notes/config.json 在用户家目录, 不在本项目内
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---- Python / 环境 ----
+__pycache__/
+*.pyc
+.venv/
+miniconda3/
+.pytest_cache/
+.coverage
+
+# ---- 文档 / 杂项 ----
+logs/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

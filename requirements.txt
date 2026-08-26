@@ -1,0 +1,10 @@
+# Versions verified by the project test suite on Python 3.11.
+faster-whisper==1.2.1
+# 4.8.1 can crash with Windows access violation 0xC0000005 while loading a model.
+ctranslate2==4.6.0
+# OpenKB -> MarkItDown -> Magika uses ONNX Runtime. 1.21+ has failed to load
+# its CPU DLL on some otherwise supported Windows machines.
+onnxruntime==1.20.1
+numpy==2.4.6
+# Official OpenKB provides wiki compilation, grounded query and native 3D graph.
+openkb==0.4.5
