@@ -14,6 +14,7 @@
 import json, time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 import config
 
@@ -31,6 +32,10 @@ def _api_chat(base_url, api_key, model, messages, temperature=0.4, max_tokens=20
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    # Flash enables thinking by default. Disable it for note generation;
+    # other OpenAI-compatible providers may reject this DeepSeek parameter.
+    if urlparse(base_url).hostname == "api.deepseek.com":
+        payload["thinking"] = {"type": "disabled"}
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
@@ -55,7 +60,8 @@ def _api_chat(base_url, api_key, model, messages, temperature=0.4, max_tokens=20
             print(f"   LLM 调用失败(第{attempt+1}/3): {e}")
         if attempt < 2:
             time.sleep(3)
-    raise LLMRequestError("LLM 调用多次失败，请检查 API key、服务状态或网络") from last_error
+    detail = f"{type(last_error).__name__}: {last_error}" if last_error else "未知错误"
+    raise LLMRequestError(f"LLM 调用多次失败: {detail}") from last_error
 
 
 def generate(system_prompt: str, user_text: str, temperature=0.4, max_tokens=2000) -> str:

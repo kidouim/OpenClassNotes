@@ -2,12 +2,13 @@
 """
 本地配置管理 —— 管理 API key / 模型 / LLM 模式 等, 全部存本地。
 
-配置存放: ~/.class-notes/config.json  (权限 600, 仅当前用户可读写)
+配置存放: ~/.class-notes/config.json。
 数据存放: 项目内的笔记/转写/OpenKB 知识库, 以及 ~/.class-notes/ 配置。
 
-首次使用会引导用户填写 API key; 也可用 build_ollama 之类, 但默认只填 key。
+首次使用会引导用户填写 API key，默认使用 DeepSeek Flash。
 """
 import getpass
+from copy import deepcopy
 import json, os, sys
 from pathlib import Path
 
@@ -17,10 +18,14 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "llm_mode": "api",           # 目前支持: "api"(deepseek) ; 预留 "claude"/"codex"
+    "transcription": {
+        "device": "auto",
+        "language": "auto",
+    },
     "api": {
-        "base_url": "https://api.deepseek.com/v1",   # deepseek 官方(OpenAI 兼容)
+        "base_url": "https://api.deepseek.com",   # DeepSeek 官方 OpenAI 兼容接口
         "api_key": "",
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
     },
 }
 
@@ -44,12 +49,16 @@ def load_config() -> dict:
         if CONFIG_FILE.exists():
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             # 合并默认, 防止字段缺失
-            merged = {**DEFAULT_CONFIG, **data}
+            merged = {**deepcopy(DEFAULT_CONFIG), **data}
             merged["api"] = {**DEFAULT_CONFIG["api"], **merged.get("api", {})}
+            merged["transcription"] = {
+                **DEFAULT_CONFIG["transcription"],
+                **merged.get("transcription", {}),
+            }
             return merged
     except Exception as e:
         print(f"⚠️  配置读取失败({e}), 已重置")
-    return DEFAULT_CONFIG
+    return deepcopy(DEFAULT_CONFIG)
 
 
 def save_config(cfg: dict) -> None:
@@ -67,11 +76,70 @@ def has_api_key() -> bool:
     return bool(cfg.get("api", {}).get("api_key"))
 
 
+def get_transcription_device() -> str:
+    """Return the persisted Whisper device preference."""
+    device = load_config().get("transcription", {}).get("device", "auto")
+    return device if device in {"auto", "cuda", "cpu"} else "auto"
+
+
+def get_transcription_language() -> str:
+    """Return the persisted Whisper language preference."""
+    language = load_config().get("transcription", {}).get("language", "auto")
+    return language if language in {"auto", "en", "zh"} else "auto"
+
+
+def prompt_for_transcription_device() -> None:
+    """Let the user persistently choose automatic, GPU, or CPU transcription."""
+    labels = {"auto": "自动（推荐）", "cuda": "GPU (CUDA)", "cpu": "CPU"}
+    choices = {"1": "auto", "2": "cuda", "3": "cpu"}
+    current = get_transcription_device()
+    print(f"\n当前转录设备: {labels[current]}")
+    print(" 1) 自动（检测到可用 CUDA 时使用 GPU，否则使用 CPU）")
+    print(" 2) GPU (CUDA)")
+    print(" 3) CPU")
+    selected = input("请选择 [1/2/3，空=取消]: ").strip()
+    if not selected:
+        print("已取消，设置未变。")
+        return
+    device = choices.get(selected)
+    if not device:
+        print("无效选项，设置未变。")
+        return
+    cfg = load_config()
+    cfg.setdefault("transcription", {})["device"] = device
+    save_config(cfg)
+    print(f"✅ 转录设备已设为: {labels[device]}")
+
+
+def prompt_for_transcription_language() -> None:
+    """Let the user persistently choose automatic, English, or Chinese ASR."""
+    labels = {"auto": "自动检测", "en": "English", "zh": "中文"}
+    choices = {"1": "auto", "2": "en", "3": "zh"}
+    current = get_transcription_language()
+    print(f"\n当前录音语言: {labels[current]}")
+    print(" 1) 自动检测")
+    print(" 2) English")
+    print(" 3) 中文")
+    selected = input("请选择 [1/2/3，空=取消]: ").strip()
+    if not selected:
+        print("已取消，设置未变。")
+        return
+    language = choices.get(selected)
+    if not language:
+        print("无效选项，设置未变。")
+        return
+    cfg = load_config()
+    cfg.setdefault("transcription", {})["language"] = language
+    save_config(cfg)
+    print(f"✅ 录音语言已设为: {labels[language]}")
+
+
 def prompt_for_api_key() -> None:
     """首次引导: 交互式让用户输入 API key。"""
-    print("\n首次使用 OpenClassNotes, 需要配置 LLM 的 API key。")
-    print("当前支持 DeepSeek(最便宜、中文好)。需要先去 https://platform.deepseek.com 获取 api_key。")
-    print("(或填任意 OpenAI 兼容服务的 base_url / key / model)\n")
+    print("\nOpenClassNotes · API 配置")
+    print("默认使用 DeepSeek Flash。获取 Key: https://platform.deepseek.com/api_keys")
+    print("官方 Base URL: https://api.deepseek.com · 模型: deepseek-flash")
+    print("也可填写其他 OpenAI 兼容服务的地址、Key 和模型。\n")
 
     cfg = load_config()
 
@@ -85,7 +153,7 @@ def prompt_for_api_key() -> None:
 
     cfg["api"]["base_url"] = input(f"API Base URL [{cfg['api']['base_url']}]: ").strip() or cfg["api"]["base_url"]
     cfg["api"]["api_key"] = getpass.getpass("API Key: ").strip()
-    cfg["api"]["model"] = input(f"模型名称 [deepseek-chat]: ").strip() or "deepseek-chat"
+    cfg["api"]["model"] = input(f"模型名称 [{cfg['api']['model']}]: ").strip() or cfg["api"]["model"]
     cfg["llm_mode"] = "api"
 
     save_config(cfg)

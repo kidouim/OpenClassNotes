@@ -251,6 +251,16 @@ def cmd_config():
     config.prompt_for_api_key()
 
 
+def cmd_device():
+    """配置 Whisper 转录设备"""
+    config.prompt_for_transcription_device()
+
+
+def cmd_language():
+    """配置 Whisper 录音语言"""
+    config.prompt_for_transcription_language()
+
+
 def cmd_guide():
     """使用指南"""
     print("""
@@ -263,6 +273,8 @@ def cmd_guide():
 4. 菜单 r 可选择一门课程重新处理，用于应用新版清洗规则；空输入会取消。
 5. 菜单 2 是 OpenKB 问答；菜单 3 打开原生 3D/思维导图/径向图谱。
 6. 从旧版本升级时，菜单 4 可把 notes/ 中已有笔记增量同步进 OpenKB。
+7. 菜单 7 可选择自动、GPU (CUDA) 或 CPU 转录；默认自动。
+8. 菜单 8 可选择自动检测、English 或中文；已知语言时建议明确选择。
 
 产出位置:
   transcripts/       → 自动纠错后的带时间戳转写稿
@@ -288,6 +300,8 @@ MAIN_MENU = """
  4) 🔄   同步已有笔记
  5) ⚙️   配置 API key
  6) ❓   使用指南
+ 7) 🖥️   选择转录设备 (自动/GPU/CPU)
+ 8) 🌐   选择录音语言 (自动/English/中文)
  r) ♻️   重新处理课程
  q)     退出
 ========================================================
@@ -300,6 +314,8 @@ MENU_HANDLERS = {
     "4": cmd_sync,
     "5": cmd_config,
     "6": cmd_guide,
+    "7": cmd_device,
+    "8": cmd_language,
     "r": cmd_reprocess,
 }
 

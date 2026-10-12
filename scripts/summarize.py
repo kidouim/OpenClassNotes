@@ -127,20 +127,22 @@ def _parse_model_response(response: str) -> tuple[str, list[dict], bool]:
         return text, [], False
 
     corrections_text = match.group(1).strip()
+    note = match.group(2).strip()
+    if not note:
+        raise ValueError("模型返回的 Markdown 笔记为空")
     if corrections_text.startswith("```"):
         corrections_text = re.sub(r"^```(?:json)?\s*", "", corrections_text)
         corrections_text = re.sub(r"\s*```$", "", corrections_text)
     try:
         corrections = json.loads(corrections_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("模型返回的 corrections 不是有效 JSON") from exc
+    except json.JSONDecodeError:
+        # The note body is still usable. Ignoring malformed corrections is safe
+        # because it guarantees that no unvalidated transcript edit is applied.
+        return note, [], False
     if not isinstance(corrections, list) or not all(
         isinstance(item, dict) for item in corrections
     ):
-        raise ValueError("模型返回的 corrections 必须是 JSON 数组")
-    note = match.group(2).strip()
-    if not note:
-        raise ValueError("模型返回的 Markdown 笔记为空")
+        return note, [], False
     return note, corrections, True
 
 
@@ -262,7 +264,7 @@ def _backup_raw_transcript(transcript: Path, raw: str) -> Path:
         _atomic_write(backup, raw)
     return backup
 
-def call_llm(text: str) -> str:
+def call_llm(text: str, retry_hint: str = "") -> str:
     """调用 LLM(走 llm_client, 读本地配置的 key)。"""
     latin = len(re.findall(r"[A-Za-z]", text))
     latin_words = len(re.findall(r"\b[A-Za-z]{2,}\b", text))
@@ -271,9 +273,10 @@ def call_llm(text: str) -> str:
     return llm_client.generate(
         SYSTEM_PROMPT,
         f"转写稿主要语言为 {language}，最终笔记必须使用 {language}。"
+        f"{retry_hint}"
         f"以下是一节课的带全局行号转写稿，请纠正明确的 ASR 错误并整理成笔记:\n\n{text}",
         temperature=0.2,
-        max_tokens=2400,
+        max_tokens=4000,
     )
 
 def summarize(transcript: Path) -> Path:
@@ -294,8 +297,24 @@ def summarize(transcript: Path) -> Path:
     for i, part in enumerate(parts):
         print(f"         处理第 {i+1}/{len(parts)} 段...")
         label = f"第{i+1}部分" if len(parts) > 1 else ""
-        response = call_llm(f"{label}\n{part}" if label else part)
-        note_section, proposals, structured = _parse_model_response(response)
+        chunk_text = f"{label}\n{part}" if label else part
+        parse_error = None
+        for attempt in range(3):
+            retry_hint = ""
+            if attempt:
+                retry_hint = (
+                    "上次输出格式不完整。必须从 <OPENCLASSNOTES_CORRECTIONS> 开始，"
+                    "并以 </OPENCLASSNOTES_NOTE> 完整结束；不要输出协议之外的内容。"
+                )
+                print(f"         第 {i+1} 段格式不完整，重试 {attempt+1}/3...")
+            response = call_llm(chunk_text, retry_hint=retry_hint)
+            try:
+                note_section, proposals, structured = _parse_model_response(response)
+                break
+            except ValueError as exc:
+                parse_error = exc
+        else:
+            raise parse_error
         sections.append(note_section)
         correction_proposals.extend(proposals)
         used_protocol = used_protocol and structured

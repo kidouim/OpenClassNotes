@@ -7,4 +7,4 @@ if [ ! -x .venv/bin/python ]; then
     exit 1
 fi
 
-CLASSNOTES_DEVICE="${CLASSNOTES_DEVICE:-auto}" .venv/bin/python cli.py
+.venv/bin/python cli.py

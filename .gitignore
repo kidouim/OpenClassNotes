@@ -26,6 +26,14 @@ miniconda3/
 # ---- 文档 / 杂项 ----
 logs/
 *.log
+run_input*.txt
+*.tmp
+*.bak
+htmlcov/
+coverage.xml
+.class-notes/
+.openkb/
+OpenKL/
 .DS_Store
 Thumbs.db
 desktop.ini

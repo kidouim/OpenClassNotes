@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidateSet("auto", "cpu", "cuda")]
-    [string]$Device = "auto"
+    [string]$Device,
+    [ValidateSet("auto", "en", "zh")]
+    [string]$Language
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +14,16 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
     throw "Environment is not installed. Run .\setup.ps1 first."
 }
 
-$env:CLASSNOTES_DEVICE = $Device
+if ($PSBoundParameters.ContainsKey("Device")) {
+    $env:CLASSNOTES_DEVICE = $Device
+} else {
+    Remove-Item Env:CLASSNOTES_DEVICE -ErrorAction SilentlyContinue
+}
+if ($PSBoundParameters.ContainsKey("Language")) {
+    $env:CLASSNOTES_LANGUAGE = $Language
+} else {
+    Remove-Item Env:CLASSNOTES_LANGUAGE -ErrorAction SilentlyContinue
+}
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"

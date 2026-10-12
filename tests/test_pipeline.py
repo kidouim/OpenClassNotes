@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "scripts"), str(ROOT)]
 
 import cli
+import config
 import llm_client
 import openkb_backend
 import processing_state
@@ -24,6 +26,136 @@ import transcribe as transcribe_module
 
 
 class PipelineTests(unittest.TestCase):
+    def setUp(self):
+        private = tempfile.TemporaryDirectory()
+        self.addCleanup(private.cleanup)
+        tmp = Path(private.name)
+        for attribute, value in (("CONFIG_DIR", tmp), ("CONFIG_FILE", tmp / "config.json")):
+            patcher = mock.patch.object(config, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        # Tests must never read the developer's key or device/language settings.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("CLASSNOTES_DEVICE", None)
+        os.environ.pop("CLASSNOTES_LANGUAGE", None)
+
+    def test_config_changes_do_not_mutate_first_run_defaults(self):
+        cfg = config.load_config()
+        cfg["api"]["model"] = "custom-model"
+        cfg["transcription"]["language"] = "en"
+        fresh = config.load_config()
+        self.assertEqual(fresh["api"]["model"], "deepseek-flash")
+        self.assertEqual(fresh["api"]["api_key"], "")
+        self.assertEqual(fresh["transcription"]["language"], "auto")
+
+    def test_saved_language_can_be_overridden_for_one_run(self):
+        with mock.patch.object(builtins, "input", return_value="3"):
+            config.prompt_for_transcription_language()
+        model = mock.Mock()
+        model.transcribe.return_value = (iter([]), SimpleNamespace(duration=1))
+        transcribe_module._recognize(model, Path("lesson.wav"), use_vad=True)
+        self.assertEqual(model.transcribe.call_args.kwargs["language"], "zh")
+        with mock.patch.dict(os.environ, {"CLASSNOTES_LANGUAGE": "en"}):
+            transcribe_module._recognize(model, Path("lesson.wav"), use_vad=False)
+            self.assertEqual(model.transcribe.call_args.kwargs["language"], "en")
+        self.assertEqual(config.get_transcription_language(), "zh")
+
+    def test_deepseek_thinking_option_does_not_break_other_providers(self):
+        for base_url, deepseek in (
+            ("https://api.deepseek.com", True),
+            ("https://api.deepseek.com/v1", True),
+            ("https://example.invalid/v1", False),
+        ):
+            with self.subTest(base_url=base_url):
+                response = mock.MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(
+                    {"choices": [{"message": {"content": "OK"}}]}
+                ).encode()
+                with mock.patch.object(llm_client.urllib.request, "urlopen", return_value=response) as request:
+                    result = llm_client._api_chat(base_url, "placeholder-key", "model", [])
+                self.assertEqual(result, "OK")
+                payload = json.loads(request.call_args.args[0].data)
+                self.assertEqual("thinking" in payload, deepseek)
+                if deepseek:
+                    self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_cuda_worker_requires_completion_marker_and_cleans_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "lesson.txt"
+            output.write_text("finished transcript", encoding="utf-8")
+            markers = []
+
+            def crash_after_success(command, **kwargs):
+                marker = Path(command[-1])
+                markers.append(marker)
+                marker.write_text(str(output), encoding="utf-8")
+                return SimpleNamespace(returncode=0xC0000005)
+
+            with mock.patch.object(transcribe_module.subprocess, "run", side_effect=crash_after_success):
+                self.assertEqual(transcribe_module._transcribe_with_cuda_worker(Path("lesson.wav"), "small"), output)
+            self.assertFalse(markers[0].exists())
+
+            def crash_before_completion(command, **kwargs):
+                markers.append(Path(command[-1]))
+                return SimpleNamespace(returncode=0xC0000005)
+
+            with mock.patch.object(transcribe_module.subprocess, "run", side_effect=crash_before_completion):
+                with self.assertRaisesRegex(RuntimeError, "GPU 转写子进程失败"):
+                    transcribe_module._transcribe_with_cuda_worker(Path("lesson.wav"), "small")
+            self.assertFalse(markers[1].exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows CUDA worker dispatch")
+    def test_auto_worker_failure_falls_back_but_explicit_cuda_reports_error(self):
+        for device in ("auto", "cuda"):
+            with (
+                self.subTest(device=device),
+                mock.patch.dict(os.environ, {"CLASSNOTES_DEVICE": device}),
+                mock.patch.object(transcribe_module, "_cuda_runtime_available", return_value=True),
+                mock.patch.object(transcribe_module, "_transcribe_with_cuda_worker", side_effect=RuntimeError("worker failed")),
+                mock.patch.object(transcribe_module, "_transcribe_in_process", return_value=Path("lesson.txt")) as cpu,
+            ):
+                if device == "cuda":
+                    with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                        transcribe_module.transcribe(Path("lesson.wav"))
+                    cpu.assert_not_called()
+                else:
+                    self.assertEqual(transcribe_module.transcribe(Path("lesson.wav")), Path("lesson.txt"))
+                    cpu.assert_called_once()
+                self.assertEqual(os.environ["CLASSNOTES_DEVICE"], device)
+
+    def test_incomplete_note_is_retried_before_saving(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            transcript = tmp / "lesson.txt"
+            transcript.write_text("[0.0 - 2.0] Classroom content", encoding="utf-8")
+            complete = (
+                "<OPENCLASSNOTES_CORRECTIONS>[]</OPENCLASSNOTES_CORRECTIONS>"
+                "<OPENCLASSNOTES_NOTE># Recovered note</OPENCLASSNOTES_NOTE>"
+            )
+            with (
+                mock.patch.object(summarize, "NOTES", tmp),
+                mock.patch.object(summarize, "call_llm", side_effect=["<OPENCLASSNOTES_NOTE>partial", complete]) as generate,
+            ):
+                note = summarize.summarize(transcript)
+            self.assertIn("# Recovered note", note.read_text(encoding="utf-8"))
+            self.assertEqual(generate.call_count, 2)
+            self.assertTrue(generate.call_args.kwargs["retry_hint"])
+            self.assertIn("Classroom content", transcript.read_text(encoding="utf-8"))
+
+    def test_transcription_device_selection_is_persisted(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with (
+                mock.patch.object(config, "CONFIG_DIR", tmp),
+                mock.patch.object(config, "CONFIG_FILE", tmp / "config.json"),
+                mock.patch.object(builtins, "input", return_value="2"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                config.prompt_for_transcription_device()
+                self.assertEqual(config.get_transcription_device(), "cuda")
+
     def test_powershell_launchers_are_ascii_for_windows_powershell_51(self):
         for name in ("setup.ps1", "run.ps1"):
             raw = (ROOT / name).read_bytes()
@@ -119,6 +251,16 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "清洗协议不完整"):
             summarize._parse_model_response(response)
 
+    def test_invalid_correction_json_keeps_note_without_editing_transcript(self):
+        response = (
+            "<OPENCLASSNOTES_CORRECTIONS>not-json</OPENCLASSNOTES_CORRECTIONS>"
+            "<OPENCLASSNOTES_NOTE># Safe note</OPENCLASSNOTES_NOTE>"
+        )
+        note, corrections, structured = summarize._parse_model_response(response)
+        self.assertEqual(note, "# Safe note")
+        self.assertEqual(corrections, [])
+        self.assertFalse(structured)
+
     def test_malformed_protocol_preserves_transcript_and_existing_note(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -211,13 +353,13 @@ class PipelineTests(unittest.TestCase):
                 mock.patch.object(
                     openkb_backend,
                     "_api_settings",
-                    return_value=("secret-test-key", "https://api.deepseek.com/v1", "deepseek/deepseek-chat"),
+                    return_value=("placeholder-key", "https://api.deepseek.com", "deepseek/deepseek-flash"),
                 ),
             ):
                 openkb_backend.ensure_knowledge_base(kb)
             config = load_config(kb / ".openkb" / "config.yaml")
             schema = (kb / "wiki" / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertEqual(config["model"], "deepseek/deepseek-chat")
+            self.assertEqual(config["model"], "deepseek/deepseek-flash")
             self.assertIn("OpenClassNotes source-grounding rules", schema)
             self.assertFalse((kb / ".env").exists())
 
@@ -228,7 +370,7 @@ class PipelineTests(unittest.TestCase):
             mock.patch.object(
                 openkb_backend,
                 "_api_settings",
-                return_value=("temporary-key", "https://api.deepseek.com/v1", "deepseek/model"),
+                return_value=("temporary-key", "https://api.deepseek.com", "deepseek/model"),
             ),
         ):
             before = {key: os.environ.get(key) for key in keys}
@@ -461,7 +603,7 @@ class PipelineTests(unittest.TestCase):
                 mock.patch.object(transcribe_module, "_cuda_runtime_available", return_value=True),
                 mock.patch.object(transcribe_module, "WhisperModel", FakeModel),
             ):
-                output = transcribe_module.transcribe(audio)
+                output = transcribe_module._transcribe_in_process(audio)
             self.assertEqual(FakeModel.calls, [True, False])
             self.assertIn("Recovered classroom explanation", output.read_text(encoding="utf-8"))
 
